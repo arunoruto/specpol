@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from polar import PATTERN, mean_stokes, stokes
+from polar import PATTERN, from_intensities, mean_stokes, split, stokes
 
 
 def mosaic(fn, shape=(4, 4)):
@@ -32,7 +32,21 @@ def test_mean_dolp_averages_intensities_first():
     assert abs(mean_stokes(raw)["dolp"]) < 1e-6
 
 
+def test_binning():
+    # 2x2 binning keeps the polarization, halves each side (odd edge cropped), halves the noise.
+    rng = np.random.default_rng(0)
+    raw = rng.poisson(mosaic(lambda a: 1000 * np.cos(np.radians(a - 30)) ** 2, (202, 302))).astype(np.uint16)
+    b = split(raw, 2)
+    assert b[0].shape == (50, 75)
+    assert np.isclose(np.median(from_intensities(b)["aolp"]), 30, atol=0.5)
+    noise = [from_intensities(split(raw, n))["s0"].std() for n in (1, 2)]
+    assert 1.8 < noise[0] / noise[1] < 2.2, noise
+    # Only what's asked for is computed.
+    assert set(from_intensities(b, need=())) == {"s0", "s1", "s2"}
+
+
 if __name__ == "__main__":
+    test_binning()
     test_malus()
     test_mean_dolp_averages_intensities_first()
     print("ok")

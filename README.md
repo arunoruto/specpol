@@ -31,6 +31,9 @@ devenv shell          # or: nix run nixpkgs#devenv -- shell
 app                   # = uv run streamlit run app.py
 DZK_FAKE=1 app        # simulated camera, no hardware needed
                       # open http://localhost:8501/?demo for the visitor demo view
+                      # (?demo&cols=4: all four images in one row, for 21:9 screens;
+                      #  demo is mirrored like a mirror, ?mirror=0 turns that off;
+                      #  &bin=2 averages 2x2 super-pixels: faster, less noise, half resolution)
 uv run python test_polar.py
 ```
 

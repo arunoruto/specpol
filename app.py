@@ -2,25 +2,33 @@
 
 Run: DZK_FAKE=1 for the simulated camera; otherwise `app` inside `devenv shell`.
 Open with ?demo (http://localhost:8501/?demo) for the visitor-friendly demo view.
+Add &cols=4 for a single row of four images on widescreen monitors.
 """
 
+import base64
+import io
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import streamlit as st
 import tifffile
+from PIL import Image
 
 from camera import Camera, full_scale
-from polar import PATTERN, mean_stokes, split, stokes
+from polar import PATTERN, from_intensities, mean_stokes, split
 
 DATA = Path("data")
 FILTERS = Path("filters.json")  # last used filter table
 DEFAULT_FILTERS = [{"name": "open", "wavelength_nm": None, "exposure_ms": 10.0}]
 
 DEMO = "demo" in st.query_params
+COLS = int(st.query_params.get("cols", 2))  # grid columns: ?cols=4 puts all four side by side (widescreen)
+MIRROR = st.query_params.get("mirror", "1" if DEMO else "0") == "1"  # preview like a mirror; demo default, ?mirror=0 off
+BIN = int(st.query_params.get("bin", 1))  # preview: average n×n super-pixels, ?bin=2 = 4x fewer pixels, 2x less noise
 st.set_page_config("Polarisationskamera" if DEMO else "DZK 33UX250", layout="wide",
                    initial_sidebar_state="collapsed" if DEMO else "auto")
 
@@ -39,6 +47,13 @@ def hue(h):
 
 
 AOLP_LEGEND = np.tile(hue(np.linspace(0, 1, 360, endpoint=False)), (12, 1, 1))
+HUE_LUT = hue(np.linspace(0, 1, 256, endpoint=False))
+
+
+def aolp_rgb(aolp):
+    """hue((aolp % 180) / 180) via a 256-colour LUT, ~4x faster. AoLP is in [-90, 90]:
+    +180 makes it positive, & 255 wraps the 180° period (one full colour wheel)."""
+    return HUE_LUT[((aolp + 180) * (256 / 180)).astype(np.intp) & 255]
 
 
 @st.cache_resource
@@ -66,6 +81,8 @@ with st.sidebar:
     n_frames = st.number_input("Frames per filter", 1, 1000, 5)
     dolp_full = st.slider("AoLP×DoLP: DoLP at full brightness", 0.05, 1.0, 0.3,
                           help="Lower = more colour for weakly polarized scenes (most real scenes: DoLP 0.05–0.3)")
+    gamma = st.slider("Display gamma", 1.0, 3.0, 2.2, 0.1,
+                      help="Brightens shadows and midtones of the linear sensor data, preview only (saved TIFFs stay raw). 1 = linear")
     st.header("Filters")
     st.caption("One row per filter, captured in this order. Add a `dark` row (lens capped) for dark frames.")
     filters_df = st.data_editor(
@@ -131,7 +148,10 @@ with left:
 
 
 def stretch(x):
-    return to8(x, *np.percentile(x, [0.5, 99.5]))
+    """Percentile stretch plus display gamma (12-bit LUT: fast, and no banding in the shadows)."""
+    lo, hi = np.percentile(x[::4, ::4], [0.5, 99.5])  # subsampled: same limits, 10x faster
+    lut = (np.linspace(0, 1, 4096) ** (1 / gamma) * 255).astype(np.uint8)
+    return lut[(np.clip((x - lo) / max(hi - lo, 1e-9), 0, 1) * 4095).astype(np.intp)]
 
 
 def render(view, img, s, angles):
@@ -141,27 +161,43 @@ def render(view, img, s, angles):
     if view in ANGLES:
         return stretch(angles[int(view[1:])])
     if view in ("S1", "S2", "Error"):  # signed: mid-grey = 0, symmetric stretch
-        v = np.percentile(np.abs(s[view.lower()]), 99.5)
+        v = np.percentile(np.abs(s[view.lower()][::4, ::4]), 99.5)
         return to8(s[view.lower()], -v, v)
     if view == "DoLP":
         return to8(s["dolp"], 0, 1)
     if view == "AoLP":
-        return hue((s["aolp"] % 180) / 180)  # AoLP is 180°-periodic → one full colour wheel
+        return aolp_rgb(s["aolp"])
     if view == "AoLP×DoLP":  # colour = angle, brightness = DoLP, dimmed where it's dark (noisy DoLP)
         v = np.clip(s["dolp"] / dolp_full, 0, 1) * stretch(s["s0"]) / 255
-        return (hue((s["aolp"] % 180) / 180) * v[..., None]).astype(np.uint8)
+        return (aolp_rgb(s["aolp"]) * v[..., None]).astype(np.uint8)
     return stretch(s["s0"])
 
 
-@st.fragment(run_every=1.0)
+def live_image(im, caption=None, where=st):
+    """Image inlined as a data URI. st.image serves a file that the next fragment run deletes,
+    so at fast refresh the browser sometimes fetches it too late and shows nothing."""
+    buf = io.BytesIO()
+    im = np.ascontiguousarray(im[:, ::-1] if MIRROR else im)
+    Image.fromarray(im).save(buf, "JPEG", quality=85)
+    cap = f'<figcaption style="text-align:center;opacity:.6;font-size:.875rem">{caption}</figcaption>' if caption else ""
+    where.html(f'<figure style="margin:0"><img style="width:100%" '
+               f'src="data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}">{cap}</figure>')
+
+
+@st.fragment(run_every=0.1)  # target ~10 fps; slower frames just queue, never pile up
 def preview(exposure_ms, cells):
     try:
-        img, m = cam.grab(exposure_ms * 1e3, gain, fmt)
+        img, m = cam.grab_live(exposure_ms * 1e3, gain, fmt)
     except RuntimeError as e:
         st.warning(f"Preview: {e}")
         return
     full = full_scale(img.dtype)
-    s, angles = stokes(img), split(img)
+    # Grid outside the demo: small tiles, bin 2x on top (was: render full, then show every 2nd pixel).
+    angles = split(img, BIN * (2 if len(cells) > 1 and not DEMO else 1))
+    s = from_intensities(angles, {k for k in ("dolp", "aolp", "error") if any(k in v.lower() for v in cells)})
+    if MIRROR:  # live_image flips left-right; a mirror also flips polarization angles: θ → -θ
+        s = {**s, "s2": -s["s2"]} | ({"aolp": -s["aolp"]} if "aolp" in s else {})
+        angles = {a: angles[-a % 180] for a in angles}  # 45° ↔ 135°
     if not DEMO:
         ms = mean_stokes(img)  # frame means of the intensities, then DoLP/AoLP from those
         a, b, c, d, e, f = st.columns(6)
@@ -175,13 +211,15 @@ def preview(exposure_ms, cells):
         st.image(AOLP_LEGEND, width="stretch", caption="Farbe = Schwingungsrichtung des Lichts, 0° bis 180°" if DEMO
                  else "AoLP 0° → 180° (red 0°, green 60°, blue 120°)")
     if len(cells) == 1:
-        st.image(render(cells[0], img, s, angles), width="stretch")
-        return
-    for row in (cells[:2], cells[2:]):
-        for col, v in zip(st.columns(2), row):
-            im = render(v, img, s, angles)
-            # Raw: decimating would keep one angle only. Demo: full res for the big screen.
-            col.image(im if v == "Raw" or DEMO else im[::2, ::2], caption=DEMO_CAPTIONS[v] if DEMO else v, width="stretch")
+        live_image(render(cells[0], img, s, angles))
+    else:
+        for i in range(0, len(cells), COLS):
+            for col, v in zip(st.columns(COLS), cells[i:i + COLS]):
+                live_image(render(v, img, s, angles), DEMO_CAPTIONS[v] if DEMO else v, col)
+    # When the next run starts, Streamlit drops this fragment's not-yet-sent messages, and its
+    # sender only flushes every 5 ms. Runs back-to-back (run_every < run time) would lose the
+    # last image every time (frozen, greyed out). This pause lets it go out first.
+    time.sleep(0.02)
 
 
 with left:

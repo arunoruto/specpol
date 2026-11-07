@@ -24,6 +24,7 @@ class Camera:
             raise RuntimeError("No camera found. Check USB cable and udev permissions (README).")
         self.cam = Aravis.Camera.new(Aravis.get_device_id(0))
         self.lock = threading.Lock()  # preview and capture share one device
+        self.stream, self.live = None, None  # running preview stream and the settings it was started with
         if self.cam.is_exposure_auto_available():
             self.cam.set_exposure_time_auto(Aravis.Auto.OFF)
         if self.cam.is_gain_auto_available():
@@ -68,31 +69,73 @@ class Camera:
                 break  # pinned at a limit: too bright/dark for exposure alone, change gain
         return exp
 
+    def _apply(self, exposure_us, gain, pixel_format):
+        c = self.cam
+        if pixel_format and c.get_pixel_format_as_string() != pixel_format:
+            c.set_pixel_format_from_string(pixel_format)
+        c.set_exposure_time(exposure_us)
+        c.set_gain(gain)
+
+    def _stop_live(self):
+        if self.stream is not None:
+            self.cam.stop_acquisition()
+            self.stream, self.live = None, None
+
     def grab(self, exposure_us: float, gain: float, pixel_format: str | None = None) -> tuple[np.ndarray, dict]:
-        """Single frame with the given settings. Returns (raw mosaic, actual settings read back)."""
+        """Single fresh frame with the given settings: acquisition starts after this call, so the
+        frame is guaranteed to be exposed with them. Returns (raw mosaic, actual settings read back)."""
         with self.lock:
-            c = self.cam
-            if pixel_format and c.get_pixel_format_as_string() != pixel_format:
-                c.set_pixel_format_from_string(pixel_format)
-            c.set_exposure_time(exposure_us)
-            c.set_gain(gain)
+            self._stop_live()
+            self._apply(exposure_us, gain, pixel_format)
             for _ in range(3):  # incomplete USB frames happen (see README: usbfs); bad ones are dropped, never returned
-                buf = c.acquisition(int(exposure_us + 3_000_000))
+                buf = self.cam.acquisition(int(exposure_us + 3_000_000))
                 if buf is not None and buf.get_status() == Aravis.BufferStatus.SUCCESS:
+                    return self._frame(buf)
+            raise RuntimeError(f"Frame failed 3x ({buf.get_status().value_nick if buf else 'no buffer'}). "
+                               "Check usbfs_memory_mb (README).")
+
+    def grab_live(self, exposure_us: float, gain: float, pixel_format: str | None = None) -> tuple[np.ndarray, dict]:
+        """Preview frame from a continuously running stream: no per-frame start/stop (~250 ms on USB).
+        Settings changes restart the stream, so frames always match them. Not for measurements:
+        the frame may have started exposing just before this call."""
+        with self.lock:
+            if self.live != (exposure_us, gain, pixel_format):
+                self._stop_live()
+                self._apply(exposure_us, gain, pixel_format)
+                self.cam.set_acquisition_mode(Aravis.AcquisitionMode.CONTINUOUS)
+                self.stream = self.cam.create_stream(None, None)
+                for _ in range(4):
+                    self.stream.push_buffer(Aravis.Buffer.new_allocate(self.cam.get_payload()))
+                self.cam.start_acquisition()
+                self.live = (exposure_us, gain, pixel_format)
+            # Stale buffers queued up since the last call go straight back; wait for the next one.
+            while (buf := self.stream.try_pop_buffer()) is not None:
+                self.stream.push_buffer(buf)
+            for _ in range(3):
+                buf = self.stream.timeout_pop_buffer(int(exposure_us + 3_000_000))
+                if buf is None:
                     break
-            else:
-                status = buf.get_status().value_nick if buf else "no buffer"
-                raise RuntimeError(f"Frame failed 3x ({status}). Check usbfs_memory_mb (README).")
-            w, h, data = buf.get_image_width(), buf.get_image_height(), buf.get_data()
-            if len(data) not in (w * h, 2 * w * h):
-                raise RuntimeError(f"Unsupported (packed?) pixel format {c.get_pixel_format_as_string()}")
-            img = np.frombuffer(data, np.uint8 if len(data) == w * h else np.uint16).reshape(h, w).copy()
-            return img, {
-                "timestamp": datetime.now().isoformat(timespec="milliseconds"),
-                "exposure_us": c.get_exposure_time(),
-                "gain": c.get_gain(),
-                "pixel_format": c.get_pixel_format_as_string(),
-                "width": w,
-                "height": h,
-                "temperature_c": self._opt("DeviceTemperature"),
-            }
+                ok = buf.get_status() == Aravis.BufferStatus.SUCCESS
+                result = self._frame(buf) if ok else None
+                self.stream.push_buffer(buf)  # _frame copies, so the buffer can be reused
+                if ok:
+                    return result
+            self._stop_live()
+            raise RuntimeError(f"Live frame failed ({buf.get_status().value_nick if buf else 'timeout'}). "
+                               "Check usbfs_memory_mb (README).")
+
+    def _frame(self, buf) -> tuple[np.ndarray, dict]:
+        c = self.cam
+        w, h, data = buf.get_image_width(), buf.get_image_height(), buf.get_data()
+        if len(data) not in (w * h, 2 * w * h):
+            raise RuntimeError(f"Unsupported (packed?) pixel format {c.get_pixel_format_as_string()}")
+        img = np.frombuffer(data, np.uint8 if len(data) == w * h else np.uint16).reshape(h, w).copy()
+        return img, {
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "exposure_us": c.get_exposure_time(),
+            "gain": c.get_gain(),
+            "pixel_format": c.get_pixel_format_as_string(),
+            "width": w,
+            "height": h,
+            "temperature_c": self._opt("DeviceTemperature"),
+        }

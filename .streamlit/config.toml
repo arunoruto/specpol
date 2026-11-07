@@ -1,0 +1,6 @@
+[global]
+# Don't cache large messages in the browser. Live preview frames are never repeated, and when
+# fragment runs follow each other back-to-back the browser's cache never expires them
+# (the "finished" message gets relabelled FINISHED_EARLY_FOR_RERUN), so every frame stayed
+# in the tab's memory: ~8 MB/s until the tab froze.
+minCachedMessageSize = 1e15
