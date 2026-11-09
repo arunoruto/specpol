@@ -22,3 +22,8 @@ autodoc_member_order = "bysource"
 exclude_patterns = ["_build"]
 html_theme = "furo"
 html_title = f"specpol {release}"
+html_theme_options = {  # "view/edit this page" links
+    "source_repository": "https://github.com/arunoruto/specpol/",
+    "source_branch": "main",
+    "source_directory": "docs/",
+}

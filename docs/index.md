@@ -8,6 +8,10 @@ super-pixel specpol computes the Stokes parameters and shows how strongly (**DoL
 direction (**AoLP**) the light is polarized, live at up to ~35 fps. Measurement runs step through
 spectral filters and save raw frames with full metadata, for spectro-polarimetry of soil samples.
 
+```{image} _static/dashboard.png
+:alt: specpol dashboard with the simulated camera
+```
+
 - **Live preview**: eight views (intensity, S1, S2, DoLP, AoLP, AoLP×DoLP, error, raw), any four side by side
 - **Measurement runs**: filter by filter, N frames each, raw TIFFs and full metadata written after every frame
 - **Video snippets**: record what the preview shows as an MP4 (H.264), one click

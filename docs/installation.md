@@ -10,7 +10,7 @@ The repository has a [devenv](https://devenv.sh) environment that provides Aravi
 dependencies and Python, and syncs the Python packages with uv:
 
 ```sh
-git clone https://github.com/arunoruto/dzk-33ux250.git specpol
+git clone https://github.com/arunoruto/specpol.git
 cd specpol
 devenv shell          # or, without devenv installed: nix run nixpkgs#devenv -- shell
 specpol --fake        # simulated camera, no hardware needed
@@ -30,7 +30,7 @@ haven't been run on Ubuntu yet; please report what differs.
 sudo apt install aravis-tools gir1.2-aravis-0.8 libaravis-0.8-0 \
     libgirepository-2.0-dev libcairo2-dev pkg-config python3-dev
 curl -LsSf https://astral.sh/uv/install.sh | sh    # uv, if not installed yet
-git clone https://github.com/arunoruto/dzk-33ux250.git specpol
+git clone https://github.com/arunoruto/specpol.git
 cd specpol
 uv sync
 uv run specpol --fake
