@@ -1,18 +1,19 @@
-# DZK 33UX250 · Polarization Camera Dashboard
+# specpol
 
-**See the polarization of light, live, and record soil-sample measurements with it.**
+**Multispectral polarization imaging: see the polarization of light live, and measure it filter by filter.**
 
-A Streamlit dashboard for The Imaging Source **DZK 33UX250** (Sony IMX250MZR, 2448×2048).
-In front of every pixel sits a tiny polarizer at 0°, 45°, 90° or 135°. From each 2×2
-super-pixel the dashboard computes the Stokes parameters and shows how strongly
-(**DoLP**) and in which direction (**AoLP**) the light is polarized, live at up to ~35 fps.
+specpol drives a polarization camera, The Imaging Source **DZK 33UX250** (Sony IMX250MZR,
+2448×2048). In front of every pixel sits a tiny polarizer at 0°, 45°, 90° or 135°. From each 2×2
+super-pixel specpol computes the Stokes parameters and shows how strongly (**DoLP**) and in which
+direction (**AoLP**) the light is polarized, live at up to ~35 fps. Measurement runs step through
+spectral filters and save raw frames with full metadata, for spectro-polarimetry of soil samples.
 
 - **Live preview**: eight views (intensity, S1, S2, DoLP, AoLP, AoLP×DoLP, error, raw), any four side by side
 - **Measurement runs**: filter by filter, N frames each, raw TIFFs and full metadata written after every frame
 - **Video snippets**: record what the preview shows as an MP4 (H.264), one click
 - **Visitor demo**: a German, open-day view at `?demo` that tells the "polarizing sunglasses" story
 - **No vendor SDK**: the camera runs on [Aravis](https://github.com/AravisProject/aravis), the open-source USB3 Vision driver
-- **No hardware needed to try it**: `DZK_FAKE=1` runs a simulated camera
+- **No hardware needed to try it**: `specpol --fake` runs a simulated camera
 
 ```mermaid
 flowchart LR
@@ -20,7 +21,7 @@ flowchart LR
     grab --> split["polar.py<br/>split → 0/45/90/135°"]
     split --> stokes["Stokes<br/>S0 S1 S2 · DoLP · AoLP"]
     stokes --> mjpeg["live.py<br/>MJPEG stream /live"]
-    mjpeg --> ui["server.py + app.py<br/>one server :8501"]
+    mjpeg --> ui["specpol<br/>server.py + app.py, one port :8501"]
     grab -->|Capture| tiff["data/…/*.tiff<br/>+ metadata.json"]
 ```
 
@@ -28,17 +29,18 @@ flowchart LR
 
 ```sh
 devenv shell          # or, without devenv installed: nix run nixpkgs#devenv -- shell
-DZK_FAKE=1 app        # simulated camera
-app                   # real camera (see "Host setup" below)
+specpol --fake        # simulated camera
+specpol               # real camera (see "Host setup" below)
+uv run pytest         # tests, no hardware needed
 ```
 
 Open <http://localhost:8501>. The first `devenv shell` builds Aravis and syncs the Python
-environment with uv, which takes a minute.
+environment with uv, which takes a minute. Options: `--port N`, `--address IP`; anything else is
+passed on to `streamlit run` (e.g. `--logger.level debug`). `python -m specpol` works too.
 
-`app` runs `streamlit run server.py`: the dashboard (`app.py`) plus the live preview stream
-(`live.py`, mounted at `/live/…`) on **one port, 8501**. Whatever reaches the page also reaches the
-images: Tailscale (`tailscale0` is trusted), an SSH tunnel, a proxy, or the university network once
-8501 is open in the firewall. `streamlit run app.py` alone shows the page without preview images.
+`specpol` serves the dashboard and the live preview stream (mounted at `/live/…`) on **one port**.
+Whatever reaches the page also reaches the images: Tailscale (`tailscale0` is trusted), an SSH
+tunnel, a proxy, or the university network once 8501 is open in the firewall.
 
 ## Host setup
 
@@ -110,6 +112,9 @@ not analysis: use a measurement run for raw data.
 
 ### Measurement run
 
+Filters are swapped by hand for now. Planned: a motorized **filter wheel**, so a run steps through
+all filters by itself after one button press (the spot in the code: `capture()` in `app.py`).
+
 1. In the sidebar, enter a **sample ID** (required), operator and notes. Pick the pixel format
    (Mono16 is the default), gain and frames per filter.
 2. Fill the **filter table**: name, wavelength and exposure, one row per filter in capture order.
@@ -148,7 +153,8 @@ pixel format, sensor temperature) rather than taken from what was requested.
 ### Analysis
 
 ```python
-import tifffile, polar
+import tifffile
+from specpol import polar
 
 raw = tifffile.imread("data/soil-01/2026-11-07_164600/open_000.tiff")
 s = polar.stokes(raw)          # per super-pixel: s0, s1, s2, dolp (0..1), aolp (deg, -90..90), error
@@ -158,7 +164,7 @@ low_noise = polar.from_intensities(polar.split(raw, n=2))  # 2×2 binned
 
 ### Calibrate the polarizer pattern once
 
-`PATTERN` in `polar.py` maps each 2×2 position to its polarizer angle. ROI offsets or
+`PATTERN` in `src/specpol/polar.py` maps each 2×2 position to its polarizer angle. ROI offsets or
 ReverseX/Y can shift it. Point the camera through a linear polarizer at 0°: **AoLP should read ~0°**.
 If it reads 90° or ±45°, swap the entries.
 
@@ -168,18 +174,22 @@ If it reads 90° or ±45°, swap the entries.
 |---|---|
 | `No camera found` | Check the cable. Is `ls -l /dev/bus/usb/*/*` group `video` for the camera? If not, the udev rule isn't active: switch and replug |
 | `Frame failed … size-mismatch` | usbfs buffer still at 16 MB, see [Host setup](#nixos) |
-| `LIBUSB_ERROR_BUSY` | Another process has the camera, usually a second `app` or a script. Only one can open it at a time |
-| Page loads but the preview images stay empty | Started with `streamlit run app.py` instead of `server.py` (`app` does it right). Check `curl -s -o /dev/null -w "%{http_code}" http://<host>:8501/live/x/0`: 404 = route there |
+| `LIBUSB_ERROR_BUSY` | Another process has the camera, usually a second `specpol` or a script. Only one can open it at a time |
+| Page loads but the preview images stay empty | Started with `streamlit run …/app.py` instead of `specpol` (the `/live` route is missing). Check `curl -s -o /dev/null -w "%{http_code}" http://<host>:8501/live/x/0`: 404 = route there |
 | Page doesn't load from another PC in the pool | Port 8501 is closed on the university network (only Tailscale is trusted on mayuri): open it in the firewall |
 
 ## Project layout
 
-| File | |
-|---|---|
-| `server.py` | Entry point (`streamlit run server.py`): `app.py` plus the `/live` stream routes on the same server |
-| `app.py` | Streamlit dashboard: preview, demo, measurement runs |
-| `live.py` | Preview stream: one capture thread, frames rendered once per browser session and pushed as MJPEG at `/live/<session>/<slot>`, slow links drop frames instead of queueing them. Also records video snippets |
-| `camera.py` | Aravis wrapper. `grab` = one guaranteed-fresh frame (for measurements), `grab_live` = continuous stream (~30 fps on USB3, for preview) |
-| `polar.py` | Mosaic split, binning and Stokes math |
-| `test_polar.py`, `test_camera.py` | `uv run python test_polar.py` / `uv run python test_camera.py` |
-| `devenv.nix` | Aravis, GObject introspection and Python via uv. `app` script |
+```
+src/specpol/
+  cli.py        # `specpol` command: starts Streamlit with server.py and fixed settings (no telemetry)
+  server.py     # ASGI app: app.py plus the /live stream routes, on one server and port
+  app.py        # the dashboard: preview, demo, video, measurement runs
+  live.py       # preview stream: one capture thread, frames rendered once per browser session and
+                #   pushed as MJPEG; slow links drop frames instead of queueing them. Video recording
+  camera.py     # Aravis wrapper: grab = one guaranteed-fresh frame (measurements),
+                #   grab_live = newest frame of a running stream (preview, up to 37.5/75 fps)
+  polar.py      # mosaic split, binning, Stokes math
+tests/          # `uv run pytest`: polarization math, camera/feed/recording against simulated cameras
+devenv.nix      # Aravis, GObject introspection, Python via uv; `specpol` script
+```

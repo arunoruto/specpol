@@ -18,7 +18,7 @@ def full_scale(dtype) -> int:
 
 class Camera:
     def __init__(self):
-        if os.environ.get("DZK_FAKE"):  # DZK_FAKE=1 → Aravis' simulated camera, for dev without hardware
+        if os.environ.get("SPECPOL_FAKE"):  # SPECPOL_FAKE=1 (specpol --fake) → Aravis' simulated camera, for dev without hardware
             Aravis.enable_interface("Fake")
         Aravis.update_device_list()
         if not Aravis.get_n_devices():

@@ -1,7 +1,8 @@
 [project]
-name = "dzk-polar"
+name = "specpol"
 version = "0.1.0"
-description = "Polarimetric soil-sample measurements with a The Imaging Source DZK 33UX250"
+description = "Multispectral polarization imaging: live Stokes preview and filter-by-filter measurement runs"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "av>=19.0.2",
@@ -12,3 +13,16 @@ dependencies = [
     "tifffile",
     "watchdog>=7.1.0",
 ]
+
+[project.scripts]
+specpol = "specpol.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

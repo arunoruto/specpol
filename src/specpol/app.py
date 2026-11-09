@@ -1,6 +1,6 @@
 """Streamlit dashboard: live polarization preview + filter-by-filter measurement runs.
 
-Run: DZK_FAKE=1 for the simulated camera; otherwise `app` inside `devenv shell`.
+Run with `specpol` (or `specpol --fake` for the simulated camera), not with `streamlit run`.
 Open with ?demo (http://localhost:8501/?demo) for the visitor-friendly demo view.
 Add &cols=4 for a single row of four images on widescreen monitors.
 """
@@ -15,9 +15,9 @@ import numpy as np
 import streamlit as st
 import tifffile
 
-from camera import Camera, full_scale
-from live import POOL, LiveFeed
-from polar import PATTERN, from_intensities, mean_stokes, split
+from specpol.camera import Camera, full_scale
+from specpol.live import POOL, LiveFeed
+from specpol.polar import PATTERN, from_intensities, mean_stokes, split
 
 DATA = Path("data")
 FILTERS = Path("filters.json")  # last used filter table

@@ -1,8 +1,8 @@
-"""Run: uv run python test_polar.py"""
+"""Polarization math: Malus's law, frame averages, binning."""
 
 import numpy as np
 
-from polar import PATTERN, from_intensities, mean_stokes, split, stokes
+from specpol.polar import PATTERN, from_intensities, mean_stokes, split, stokes
 
 
 def mosaic(fn, shape=(4, 4)):
@@ -46,9 +46,3 @@ def test_binning():
     # Only what's asked for is computed.
     assert set(from_intensities(b, need=())) == {"s0", "s1", "s2"}
 
-
-if __name__ == "__main__":
-    test_binning()
-    test_malus()
-    test_mean_dolp_averages_intensities_first()
-    print("ok")

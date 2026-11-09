@@ -1,11 +1,11 @@
-"""Run: uv run python test_camera.py  (no hardware: fakes a linear sensor)"""
+"""Camera wrapper, live feed and recording against fakes (a linear-sensor stub and Aravis' simulated camera)."""
 
 import os
 import time
 
 import numpy as np
 
-from camera import Camera, full_scale
+from specpol.camera import Camera, full_scale
 
 
 class LinearSensor(Camera):
@@ -29,7 +29,7 @@ def test_auto_exposure():
 
 def test_live_fake():
     """Live stream against Aravis' simulated camera: settings changes and one-shot grabs in between."""
-    os.environ["DZK_FAKE"] = "1"
+    os.environ["SPECPOL_FAKE"] = "1"
     cam = Camera()
     for exp in (10_000, 20_000):
         for _ in range(3):
@@ -47,9 +47,9 @@ def test_feed_fake():
     """MJPEG stream from live.py: first part is a JPEG, unknown sessions get 404."""
     import asyncio
 
-    import live
+    from specpol import live
 
-    os.environ["DZK_FAKE"] = "1"
+    os.environ["SPECPOL_FAKE"] = "1"
     feed = live.LiveFeed(Camera())
     feed.views["s"] = lambda img: [(img >> 8 if img.dtype == np.uint16 else img).astype(np.uint8)]
     feed.settings = (10_000, 0, None)
@@ -81,9 +81,9 @@ def test_record_fake():
 
     import av
 
-    from live import LiveFeed
+    from specpol.live import LiveFeed
 
-    os.environ["DZK_FAKE"] = "1"
+    os.environ["SPECPOL_FAKE"] = "1"
     feed = LiveFeed(Camera())
     grey = lambda img: (img >> 8 if img.dtype == np.uint16 else img).astype(np.uint8)  # noqa: E731
     feed.views["s"] = lambda img: [grey(img), np.stack([grey(img)] * 3, axis=2)]  # grey + RGB slot
@@ -99,10 +99,3 @@ def test_record_fake():
             assert v.codec_context.name == "h264" and (v.width, v.height) == (w * 2 // 2 * 2, h // 2 * 2)
             assert len(frames) == n and 1.0 < frames[-1].time <= 1.5, (len(frames), frames[-1].time)
 
-
-if __name__ == "__main__":
-    test_auto_exposure()
-    test_live_fake()
-    test_feed_fake()
-    test_record_fake()
-    print("ok")

@@ -13,5 +13,6 @@
     uv.sync.enable = true;
   };
 
-  scripts.app.exec = "uv run streamlit run server.py";  # server.py = app.py + the /live preview stream
+  scripts.specpol.exec = "uv run specpol \"$@\"";
+  scripts.app.exec = "uv run specpol \"$@\"";  # old name, same as `specpol`
 }
