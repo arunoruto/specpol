@@ -13,5 +13,5 @@
     uv.sync.enable = true;
   };
 
-  scripts.app.exec = "uv run streamlit run app.py";
+  scripts.app.exec = "uv run streamlit run server.py";  # server.py = app.py + the /live preview stream
 }

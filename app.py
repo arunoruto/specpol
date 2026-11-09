@@ -5,20 +5,18 @@ Open with ?demo (http://localhost:8501/?demo) for the visitor-friendly demo view
 Add &cols=4 for a single row of four images on widescreen monitors.
 """
 
-import base64
-import io
 import json
 import re
-import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import streamlit as st
 import tifffile
-from PIL import Image
 
 from camera import Camera, full_scale
+from live import POOL, LiveFeed
 from polar import PATTERN, from_intensities, mean_stokes, split
 
 DATA = Path("data")
@@ -61,8 +59,15 @@ def camera():
     return Camera()
 
 
+@st.cache_resource
+def live_feed():
+    """Capture thread and MJPEG streams for the preview images (live.py), one per app process.
+    The /live route that serves them is mounted by server.py: run `streamlit run server.py`."""
+    return LiveFeed(camera())
+
+
 try:
-    cam = camera()
+    cam, feed = camera(), live_feed()
 except Exception as e:
     st.error(f"Camera: {e}")
     st.stop()
@@ -83,6 +88,13 @@ with st.sidebar:
                           help="Lower = more colour for weakly polarized scenes (most real scenes: DoLP 0.05–0.3)")
     gamma = st.slider("Display gamma", 1.0, 3.0, 2.2, 0.1,
                       help="Brightens shadows and midtones of the linear sensor data, preview only (saved TIFFs stay raw). 1 = linear")
+    preview_bin = st.select_slider("Preview binning", [1, 2, 4], value=BIN if BIN in (1, 2, 4) else 1,
+                                   help="Average n×n super-pixels in the preview: n² fewer pixels (faster), "
+                                        "n× less noise, 1/n resolution. Preview only, saved TIFFs stay raw")
+    st.header("Video")
+    rec_s = st.slider("Length (s)", 1, 30, 5)
+    rec = st.button("Record", help="MP4 of the preview as you see it (view or grid, binning, gamma), "
+                                   "saved under data/videos/")
     st.header("Filters")
     st.caption("One row per filter, captured in this order. Add a `dark` row (lens capped) for dark frames.")
     filters_df = st.data_editor(
@@ -138,7 +150,8 @@ with left:
                  for k, (col, d) in enumerate(zip(st.columns(4), GRID_DEFAULT))]
 
     def auto_preview():
-        st.session_state.preview_ms = cam.auto_exposure(gain, fmt, st.session_state.preview_ms * 1e3) / 1e3
+        with feed.paused():
+            st.session_state.preview_ms = cam.auto_exposure(gain, fmt, st.session_state.preview_ms * 1e3) / 1e3
 
     e1, e2 = st.columns([4, 1], vertical_alignment="bottom")
     st.session_state.setdefault("preview_ms", 10.0)
@@ -173,57 +186,83 @@ def render(view, img, s, angles):
     return stretch(s["s0"])
 
 
-def live_image(im, caption=None, where=st):
-    """Image inlined as a data URI. st.image serves a file that the next fragment run deletes,
-    so at fast refresh the browser sometimes fetches it too late and shows nothing."""
-    buf = io.BytesIO()
-    im = np.ascontiguousarray(im[:, ::-1] if MIRROR else im)
-    Image.fromarray(im).save(buf, "JPEG", quality=85)
-    cap = f'<figcaption style="text-align:center;opacity:.6;font-size:.875rem">{caption}</figcaption>' if caption else ""
-    where.html(f'<figure style="margin:0"><img style="width:100%" '
-               f'src="data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}">{cap}</figure>')
-
-
-@st.fragment(run_every=0.1)  # target ~10 fps; slower frames just queue, never pile up
-def preview(exposure_ms, cells):
-    try:
-        img, m = cam.grab_live(exposure_ms * 1e3, gain, fmt)
-    except RuntimeError as e:
-        st.warning(f"Preview: {e}")
-        return
-    full = full_scale(img.dtype)
+def frames(img):
+    """The preview images for this session, one per cell. Runs in the stream server (live.py) once per
+    camera frame, with this run's widget values (gamma, dolp_full, cells)."""
     # Grid outside the demo: small tiles, bin 2x on top (was: render full, then show every 2nd pixel).
-    angles = split(img, BIN * (2 if len(cells) > 1 and not DEMO else 1))
+    angles = split(img, (BIN if DEMO else preview_bin) * (2 if len(cells) > 1 and not DEMO else 1))
     s = from_intensities(angles, {k for k in ("dolp", "aolp", "error") if any(k in v.lower() for v in cells)})
-    if MIRROR:  # live_image flips left-right; a mirror also flips polarization angles: θ → -θ
+    if MIRROR:  # images flip left-right; a mirror also flips polarization angles: θ → -θ
         s = {**s, "s2": -s["s2"]} | ({"aolp": -s["aolp"]} if "aolp" in s else {})
         angles = {a: angles[-a % 180] for a in angles}  # 45° ↔ 135°
-    if not DEMO:
-        ms = mean_stokes(img)  # frame means of the intensities, then DoLP/AoLP from those
-        a, b, c, d, e, f = st.columns(6)
-        a.metric("Max", f"{img.max()} / {full}")
-        b.metric("Saturated", f"{(img >= full).mean():.2%}")
-        c.metric("DoLP", f"{ms['dolp']:.3f}")
-        d.metric("AoLP", f"{ms['aolp']:.1f}°")
-        e.metric("Error / S0", f"{ms['error'] / max(ms['s0'], 1e-9):.2%}")
-        f.metric("Exposure", f"{m['exposure_us'] / 1e3:.2f} ms")
+    ims = POOL.map(lambda v: render(v, img, s, angles), cells)
+    return [np.ascontiguousarray(im[:, ::-1]) if MIRROR else im for im in ims]
+
+
+# The stream server renders with this session's settings; the camera runs with the latest ones.
+sid = st.session_state.setdefault("sid", uuid.uuid4().hex)
+feed.views[sid] = frames
+feed.settings = ((run["filters"][run["i"]]["exposure_ms"] if run else preview_ms) * 1e3, gain, fmt)
+STREAM = f"live/{sid}"  # relative: same host, port and protocol as the page (server.py mounts /live)
+W, H = cam.size()
+
+
+def live_image(slot, caption=None, where=st):
+    """MJPEG stream from live.py: the browser keeps the image up to date by itself, no reruns.
+    aspect-ratio reserves the space before the first frame, so the page height never changes."""
+    cap = f'<figcaption style="text-align:center;opacity:.6;font-size:.875rem">{caption}</figcaption>' if caption else ""
+    where.html(f'<figure style="margin:0"><img src="{STREAM}/{slot}" '
+               f'style="width:100%;aspect-ratio:{W}/{H};display:block">{cap}</figure>')
+
+
+@st.fragment(run_every=1)
+def metrics():
+    if feed.error:
+        st.warning(f"Preview: {feed.error}")
+    if DEMO or not feed.frame:
+        return
+    _, img, m = feed.frame
+    full = full_scale(img.dtype)
+    ms = mean_stokes(img)  # frame means of the intensities, then DoLP/AoLP from those
+    a, b, c, d, e, f, g = st.columns(7)
+    a.metric("Max", f"{img.max()} / {full}")
+    b.metric("Saturated", f"{(img >= full).mean():.2%}")
+    c.metric("DoLP", f"{ms['dolp']:.3f}")
+    d.metric("AoLP", f"{ms['aolp']:.1f}°")
+    e.metric("Error / S0", f"{ms['error'] / max(ms['s0'], 1e-9):.2%}")
+    f.metric("Exposure", f"{m['exposure_us'] / 1e3:.2f} ms")
+    g.metric("FPS", f"{feed.fps(sid):.0f} / {cam.live_fps or 0:.0f}",
+             help="Preview frames reaching this browser (last 2 s) / what the camera can deliver at this exposure "
+                  "and pixel format (Mono16 ≤ 37.5, Mono8 ≤ 75). If the first is lower, rendering or the network "
+                  "is the limit: try preview binning")
+
+
+with left:
+    metrics()
     if {"AoLP", "AoLP×DoLP"} & set(cells):
         st.image(AOLP_LEGEND, width="stretch", caption="Farbe = Schwingungsrichtung des Lichts, 0° bis 180°" if DEMO
                  else "AoLP 0° → 180° (red 0°, green 60°, blue 120°)")
     if len(cells) == 1:
-        live_image(render(cells[0], img, s, angles))
+        live_image(0)
     else:
         for i in range(0, len(cells), COLS):
-            for col, v in zip(st.columns(COLS), cells[i:i + COLS]):
-                live_image(render(v, img, s, angles), DEMO_CAPTIONS[v] if DEMO else v, col)
-    # When the next run starts, Streamlit drops this fragment's not-yet-sent messages, and its
-    # sender only flushes every 5 ms. Runs back-to-back (run_every < run time) would lose the
-    # last image every time (frozen, greyed out). This pause lets it go out first.
-    time.sleep(0.02)
+            for j, (col, v) in enumerate(zip(st.columns(COLS), cells[i:i + COLS])):
+                live_image(i + j, DEMO_CAPTIONS[v] if DEMO else v, col)
 
-
-with left:
-    preview(run["filters"][run["i"]]["exposure_ms"] if run else preview_ms, cells)
+# ---- video snippet: the frames this page shows, as MP4 (live.py) ---------------------
+if rec:
+    path = DATA / "videos" / f"{datetime.now():%Y-%m-%d_%H%M%S}_{safe('_'.join(cells))}.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with st.sidebar:
+        bar = st.progress(0.0, "Recording…")
+        n = feed.record(sid, rec_s, path, COLS, progress=lambda f: bar.progress(f, "Recording…"))
+        bar.empty()
+    st.session_state.video = (path, n, rec_s)
+if "video" in st.session_state:
+    path, n, secs = st.session_state.video
+    with st.sidebar:
+        st.caption(f"`{path.name}`: {n} frames, {n / secs:.0f} fps")
+        st.download_button("Download video", path.read_bytes(), path.name, "video/mp4")
 
 if DEMO:
     st.stop()  # no measurement controls for visitors
@@ -238,14 +277,15 @@ def capture(r):
     f = r["filters"][r["i"]]
     # ponytail: manual filter swap; a filter wheel would move to f's slot here.
     bar = st.progress(0.0, f"Capturing {f['name']}")
-    for k in range(r["frames"]):
-        img, m = cam.grab(f["exposure_ms"] * 1e3, r["meta"]["settings"]["gain"], r["meta"]["settings"]["pixel_format"])
-        name = f"{safe(f['name'])}_{k:03d}.tiff"
-        entry = {"file": name, "filter": f["name"], "wavelength_nm": f["wavelength_nm"], "frame": k, **m}
-        tifffile.imwrite(r["dir"] / name, img, description=json.dumps(entry))
-        r["meta"]["frames"].append(entry)
-        write_meta(r)  # after every frame, so a crash never loses what's on disk
-        bar.progress((k + 1) / r["frames"], f"Capturing {f['name']}: {k + 1}/{r['frames']}")
+    with feed.paused():  # the preview stream must not restart between the measurement's frames
+        for k in range(r["frames"]):
+            img, m = cam.grab(f["exposure_ms"] * 1e3, r["meta"]["settings"]["gain"], r["meta"]["settings"]["pixel_format"])
+            name = f"{safe(f['name'])}_{k:03d}.tiff"
+            entry = {"file": name, "filter": f["name"], "wavelength_nm": f["wavelength_nm"], "frame": k, **m}
+            tifffile.imwrite(r["dir"] / name, img, description=json.dumps(entry))
+            r["meta"]["frames"].append(entry)
+            write_meta(r)  # after every frame, so a crash never loses what's on disk
+            bar.progress((k + 1) / r["frames"], f"Capturing {f['name']}: {k + 1}/{r['frames']}")
     r["i"] += 1
 
 
@@ -286,7 +326,8 @@ with right:
                 + (f" ({f['wavelength_nm']:g} nm)" if f["wavelength_nm"] else "")
                 + f", exposure {f['exposure_ms']:g} ms. Then press Capture.")
         def auto_filter():
-            f["exposure_ms"] = cam.auto_exposure(gain, fmt, f["exposure_ms"] * 1e3) / 1e3
+            with feed.paused():
+                f["exposure_ms"] = cam.auto_exposure(gain, fmt, f["exposure_ms"] * 1e3) / 1e3
             f["exposure_auto"] = True  # recorded in metadata.json
             write_meta(run)
 

@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from datetime import datetime
 
 import gi
@@ -25,6 +26,7 @@ class Camera:
         self.cam = Aravis.Camera.new(Aravis.get_device_id(0))
         self.lock = threading.Lock()  # preview and capture share one device
         self.stream, self.live = None, None  # running preview stream and the settings it was started with
+        self.live_fps = None  # frame rate the running stream can deliver (link limit and exposure)
         if self.cam.is_exposure_auto_available():
             self.cam.set_exposure_time_auto(Aravis.Auto.OFF)
         if self.cam.is_gain_auto_available():
@@ -76,10 +78,19 @@ class Camera:
         c.set_exposure_time(exposure_us)
         c.set_gain(gain)
 
+    def size(self) -> tuple[int, int]:
+        """Image (width, height) in pixels."""
+        _, _, w, h = self.cam.get_region()
+        return w, h
+
     def _stop_live(self):
         if self.stream is not None:
             self.cam.stop_acquisition()
             self.stream, self.live = None, None
+
+    def stop_live(self):
+        with self.lock:
+            self._stop_live()
 
     def grab(self, exposure_us: float, gain: float, pixel_format: str | None = None) -> tuple[np.ndarray, dict]:
         """Single fresh frame with the given settings: acquisition starts after this call, so the
@@ -97,32 +108,54 @@ class Camera:
     def grab_live(self, exposure_us: float, gain: float, pixel_format: str | None = None) -> tuple[np.ndarray, dict]:
         """Preview frame from a continuously running stream: no per-frame start/stop (~250 ms on USB).
         Settings changes restart the stream, so frames always match them. Not for measurements:
-        the frame may have started exposing just before this call."""
+        returns the newest frame already received (up to one frame period old) without waiting,
+        and the settings in the metadata are read back once per stream start, not per frame."""
         with self.lock:
             if self.live != (exposure_us, gain, pixel_format):
                 self._stop_live()
                 self._apply(exposure_us, gain, pixel_format)
+                # Default is 30 fps; the link allows 75 (Mono8) / 37.5 (Mono16). Exposure still limits it.
+                self.cam.set_frame_rate(self.cam.get_frame_rate_bounds()[1])
+                self.live_fps = min(self.cam.get_frame_rate(), 1e6 / exposure_us)  # what the stream can deliver
                 self.cam.set_acquisition_mode(Aravis.AcquisitionMode.CONTINUOUS)
                 self.stream = self.cam.create_stream(None, None)
                 for _ in range(4):
                     self.stream.push_buffer(Aravis.Buffer.new_allocate(self.cam.get_payload()))
                 self.cam.start_acquisition()
                 self.live = (exposure_us, gain, pixel_format)
-            # Stale buffers queued up since the last call go straight back; wait for the next one.
+                c = self.cam  # each read is a USB round trip (~1 ms): once here instead of per frame
+                self.live_meta = {"exposure_us": c.get_exposure_time(), "gain": c.get_gain(),
+                                  "pixel_format": c.get_pixel_format_as_string()}
+                self.live_temp = (0.0, None)  # (monotonic time read, °C), refreshed at most once a second
+            # Newest frame already received: older ones go straight back. Nothing queued: wait for one.
+            newest = None
             while (buf := self.stream.try_pop_buffer()) is not None:
-                self.stream.push_buffer(buf)
+                if newest is not None:
+                    self.stream.push_buffer(newest)
+                newest = buf
             for _ in range(3):
-                buf = self.stream.timeout_pop_buffer(int(exposure_us + 3_000_000))
+                buf = newest or self.stream.timeout_pop_buffer(int(exposure_us + 3_000_000))
+                newest = None
                 if buf is None:
                     break
                 ok = buf.get_status() == Aravis.BufferStatus.SUCCESS
-                result = self._frame(buf) if ok else None
-                self.stream.push_buffer(buf)  # _frame copies, so the buffer can be reused
+                result = self._live_frame(buf) if ok else None
+                self.stream.push_buffer(buf)  # _live_frame copies, so the buffer can be reused
                 if ok:
                     return result
             self._stop_live()
             raise RuntimeError(f"Live frame failed ({buf.get_status().value_nick if buf else 'timeout'}). "
                                "Check usbfs_memory_mb (README).")
+
+    def _live_frame(self, buf) -> tuple[np.ndarray, dict]:
+        w, h, data = buf.get_image_width(), buf.get_image_height(), buf.get_data()
+        if len(data) not in (w * h, 2 * w * h):
+            raise RuntimeError(f"Unsupported (packed?) pixel format {self.live_meta['pixel_format']}")
+        img = np.frombuffer(data, np.uint8 if len(data) == w * h else np.uint16).reshape(h, w).copy()
+        if time.monotonic() - self.live_temp[0] > 1:
+            self.live_temp = (time.monotonic(), self._opt("DeviceTemperature"))
+        return img, {"timestamp": datetime.now().isoformat(timespec="milliseconds"), **self.live_meta,
+                     "width": w, "height": h, "temperature_c": self.live_temp[1]}
 
     def _frame(self, buf) -> tuple[np.ndarray, dict]:
         c = self.cam

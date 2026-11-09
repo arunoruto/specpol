@@ -43,7 +43,66 @@ def test_live_fake():
     print(f"live: {(time.perf_counter() - t) * 100:.0f} ms/frame")
 
 
+def test_feed_fake():
+    """MJPEG stream from live.py: first part is a JPEG, unknown sessions get 404."""
+    import asyncio
+
+    import live
+
+    os.environ["DZK_FAKE"] = "1"
+    feed = live.LiveFeed(Camera())
+    feed.views["s"] = lambda img: [(img >> 8 if img.dtype == np.uint16 else img).astype(np.uint8)]
+    feed.settings = (10_000, 0, None)
+
+    async def first_part():
+        parts = feed.parts("s", 0)
+        try:
+            return await asyncio.wait_for(anext(parts), 10)
+        finally:
+            await parts.aclose()
+
+    part = asyncio.run(first_part())
+    head, data = part.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"--frame\r\nContent-Type: image/jpeg") and data[:2] == b"\xff\xd8"  # JPEG SOI
+    assert feed.fps() > 0 and feed.fps("s") > 0 and feed.fps("other") == 0
+    assert feed.clients == 0  # closing the stream releases it
+    request = type("Request", (), {"path_params": {"sid": "nope", "slot": 0}})()
+    assert asyncio.run(live.stream(request)).status_code == 404
+    with feed.paused():  # a one-shot grab while paused must not be undone by the capture thread
+        feed.cam.grab(20_000, 0)
+        time.sleep(0.3)
+        assert feed.cam.stream is None
+
+
+def test_record_fake():
+    """Video snippet: a 2-slot grid recorded for 1.5 s plays back as H.264, tiled, at real speed."""
+    import tempfile
+    from pathlib import Path
+
+    import av
+
+    from live import LiveFeed
+
+    os.environ["DZK_FAKE"] = "1"
+    feed = LiveFeed(Camera())
+    grey = lambda img: (img >> 8 if img.dtype == np.uint16 else img).astype(np.uint8)  # noqa: E731
+    feed.views["s"] = lambda img: [grey(img), np.stack([grey(img)] * 3, axis=2)]  # grey + RGB slot
+    feed.settings = (10_000, 0, None)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "clip.mp4"
+        n = feed.record("s", 1.5, path, cols=2)
+        assert n > 5, n
+        with av.open(str(path)) as f:
+            v = f.streams.video[0]
+            frames = list(f.decode(v))
+            h, w = feed.cam.size()[::-1]
+            assert v.codec_context.name == "h264" and (v.width, v.height) == (w * 2 // 2 * 2, h // 2 * 2)
+            assert len(frames) == n and 1.0 < frames[-1].time <= 1.5, (len(frames), frames[-1].time)
+
+
 if __name__ == "__main__":
     test_auto_exposure()
     test_live_fake()
+    test_feed_fake()
+    test_record_fake()
     print("ok")

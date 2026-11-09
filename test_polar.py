@@ -38,6 +38,8 @@ def test_binning():
     raw = rng.poisson(mosaic(lambda a: 1000 * np.cos(np.radians(a - 30)) ** 2, (202, 302))).astype(np.uint16)
     b = split(raw, 2)
     assert b[0].shape == (50, 75)
+    x = raw[1::2, 1::2][:100, :150].astype(np.float32)  # PATTERN (1, 1) = 0°: plain n×n mean as reference
+    assert np.allclose(b[0], x.reshape(50, 2, 75, 2).mean(axis=(1, 3)))
     assert np.isclose(np.median(from_intensities(b)["aolp"]), 30, atol=0.5)
     noise = [from_intensities(split(raw, n))["s0"].std() for n in (1, 2)]
     assert 1.8 < noise[0] / noise[1] < 2.2, noise

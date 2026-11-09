@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Polarimetric soil-sample measurements with a The Imaging Source DZK 33UX250"
 requires-python = ">=3.12"
 dependencies = [
+    "av>=19.0.2",
     "numpy",
     "pillow>=13.0.0",
     "pygobject",
