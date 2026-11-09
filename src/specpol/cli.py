@@ -16,6 +16,7 @@ STREAMLIT_FLAGS = [
 
 
 def main(argv=None):
+    """Parse the specpol options and run ``streamlit run server.py`` with them (does not return)."""
     p = argparse.ArgumentParser(prog="specpol", description=__doc__)
     p.add_argument("--fake", action="store_true", help="simulated camera (Aravis' fake camera), no hardware needed")
     p.add_argument("--port", type=int, default=8501, help="HTTP port for page and preview stream (default 8501)")

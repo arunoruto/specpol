@@ -24,7 +24,8 @@ from PIL import Image
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
-POOL = ThreadPoolExecutor(8)  # render and encode the slots of a frame in parallel (numpy and PIL release the GIL)
+#: Renders and JPEG-encodes the images of a frame in parallel (numpy and PIL release the GIL).
+POOL = ThreadPoolExecutor(8)
 
 
 def tile(ims, cols) -> np.ndarray:
@@ -40,12 +41,20 @@ def tile(ims, cols) -> np.ndarray:
 
 
 def jpeg(im) -> bytes:
+    """A uint8 grey or RGB image as JPEG (quality 85)."""
     buf = io.BytesIO()
     Image.fromarray(im).save(buf, "JPEG", quality=85)
     return buf.getvalue()
 
 
 class LiveFeed:
+    """Capture thread plus per-session rendering for the preview streams and video recording.
+
+    The app sets :attr:`settings` (exposure, gain, pixel format) and registers each browser
+    session's render function in :attr:`views`; :func:`stream` serves the result. One instance per
+    process, available as ``live.FEED``.
+    """
+
     def __init__(self, cam, max_fps=40):
         self.cam, self.max_fps = cam, max_fps
         self.settings = None  # (exposure_us, gain, pixel_format), set by the app on every run
@@ -178,10 +187,12 @@ class LiveFeed:
                 self.clients -= 1
 
 
-FEED = None  # the LiveFeed of this process (created by app.py on first page load)
+#: The LiveFeed of this process (created by app.py on the first page load).
+FEED = None
 
 
 async def stream(request):
+    """Endpoint for ``/live/<session>/<slot>``: that image's MJPEG stream, 404 for unknown sessions."""
     sid, slot = request.path_params["sid"], request.path_params["slot"]
     if FEED is None or sid not in FEED.views:
         return Response(status_code=404)
@@ -189,4 +200,5 @@ async def stream(request):
                              headers={"Cache-Control": "no-store"})
 
 
-routes = [Route("/live/{sid}/{slot:int}", stream)]  # mounted by server.py next to Streamlit's own
+#: Starlette routes, mounted by server.py next to Streamlit's own.
+routes = [Route("/live/{sid}/{slot:int}", stream)]

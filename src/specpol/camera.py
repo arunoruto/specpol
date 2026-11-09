@@ -13,10 +13,17 @@ from gi.repository import Aravis  # noqa: E402
 
 
 def full_scale(dtype) -> int:
+    """Full-scale pixel value: 255 for 8 bit, 0xFFF0 for 16 bit (12-bit ADC, MSB-aligned)."""
     return 255 if dtype == np.uint8 else 0xFFF0  # 12-bit ADC, MSB-aligned in 16 bit
 
 
 class Camera:
+    """The first camera Aravis finds (with ``SPECPOL_FAKE=1``: Aravis' simulated camera).
+
+    Auto exposure and auto gain are switched off. One lock serializes the preview stream
+    (:meth:`grab_live`) and measurements (:meth:`grab`).
+    """
+
     def __init__(self):
         if os.environ.get("SPECPOL_FAKE"):  # SPECPOL_FAKE=1 (specpol --fake) → Aravis' simulated camera, for dev without hardware
             Aravis.enable_interface("Fake")
@@ -39,6 +46,7 @@ class Camera:
             return None
 
     def info(self) -> dict:
+        """Vendor, model, serial number and firmware, as stored in a run's metadata."""
         c = self.cam
         return {
             "vendor": c.get_vendor_name(),
@@ -48,9 +56,11 @@ class Camera:
         }
 
     def pixel_formats(self) -> list[str]:
+        """Unpacked mono and polarized pixel formats the camera offers."""
         return [f for f in self.cam.dup_available_pixel_formats_as_strings() if f.startswith(("Mono", "Polarized")) and not f.endswith("p")]  # packed formats unsupported
 
     def bounds(self) -> dict:
+        """(min, max) of ``exposure_us`` and ``gain``."""
         return {"exposure_us": tuple(self.cam.get_exposure_time_bounds()), "gain": tuple(self.cam.get_gain_bounds())}
 
     def auto_exposure(self, gain, pixel_format, start_us, target=0.8, tol=0.05, max_iter=8) -> float:
@@ -89,6 +99,7 @@ class Camera:
             self.stream, self.live = None, None
 
     def stop_live(self):
+        """Stop the preview stream, if running."""
         with self.lock:
             self._stop_live()
 
