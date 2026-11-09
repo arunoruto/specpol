@@ -9,7 +9,7 @@ Start `specpol` and open <http://localhost:8501> (or `http://<host>:8501` from a
 |---|---|
 | **Intensity** | S0, the normal camera image |
 | **S1 / S2** | 0°–90° and 45°–135° differences (mid-grey = 0) |
-| **DoLP** | Degree of linear polarization, black 0 → white 1 |
+| **DoLP** | Degree of linear polarization, black 0 → white at *DoLP at full brightness* (sidebar) |
 | **AoLP** | Angle of linear polarization as hue (red 0°, green 60°, blue 120°) |
 | **AoLP×DoLP** | Hue = angle, brightness = degree. Usually the most telling view |
 | **Error** | (I0+I90) − (I45+I135). Zero for ideal polarizers, so it shows noise and artifacts |
@@ -32,8 +32,9 @@ FPS
 
 Sidebar display settings change only the preview, never saved data:
 
-AoLP×DoLP: DoLP at full brightness
-: Lower it for weakly polarized scenes (most real scenes: DoLP 0.05–0.3).
+DoLP at full brightness
+: The DoLP shown as white in the **DoLP** view and as full colour in **AoLP×DoLP** (default 0.3).
+  Lower it for weakly polarized scenes (most real scenes: DoLP 0.05–0.3).
 
 Display gamma
 : Brightens shadows and midtones of the linear sensor data.

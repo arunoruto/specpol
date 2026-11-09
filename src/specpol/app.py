@@ -84,8 +84,9 @@ with st.sidebar:
     fmt = st.selectbox("Pixel format", formats, index=next((i for i, f in enumerate(formats) if f.endswith("Mono16")), 0))
     gain = st.number_input("Gain", *map(float, bounds["gain"]), value=float(bounds["gain"][0]))
     n_frames = st.number_input("Frames per filter", 1, 1000, 5)
-    dolp_full = st.slider("AoLP×DoLP: DoLP at full brightness", 0.05, 1.0, 0.3,
-                          help="Lower = more colour for weakly polarized scenes (most real scenes: DoLP 0.05–0.3)")
+    dolp_full = st.slider("DoLP at full brightness", 0.05, 1.0, 0.3,
+                          help="DoLP shown as white (DoLP view) or full colour (AoLP×DoLP). Lower = more "
+                               "contrast for weakly polarized scenes (most real scenes: DoLP 0.05–0.3)")
     gamma = st.slider("Display gamma", 1.0, 3.0, 2.2, 0.1,
                       help="Brightens shadows and midtones of the linear sensor data, preview only (saved TIFFs stay raw). 1 = linear")
     preview_bin = st.select_slider("Preview binning", [1, 2, 4], value=BIN if BIN in (1, 2, 4) else 1,
@@ -177,7 +178,7 @@ def render(view, img, s, angles):
         v = np.percentile(np.abs(s[view.lower()][::4, ::4]), 99.5)
         return to8(s[view.lower()], -v, v)
     if view == "DoLP":
-        return to8(s["dolp"], 0, 1)
+        return to8(s["dolp"], 0, dolp_full)
     if view == "AoLP":
         return aolp_rgb(s["aolp"])
     if view == "AoLP×DoLP":  # colour = angle, brightness = DoLP, dimmed where it's dark (noisy DoLP)
