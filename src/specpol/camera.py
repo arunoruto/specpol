@@ -25,12 +25,16 @@ class Camera:
     """
 
     def __init__(self):
-        if os.environ.get("SPECPOL_FAKE"):  # SPECPOL_FAKE=1 (specpol --fake) → Aravis' simulated camera, for dev without hardware
+        fake = bool(os.environ.get("SPECPOL_FAKE"))  # SPECPOL_FAKE=1 (specpol --fake) → Aravis' simulated camera
+        if fake:
             Aravis.enable_interface("Fake")
         Aravis.update_device_list()
-        if not Aravis.get_n_devices():
-            raise RuntimeError("No camera found. Check USB cable and udev permissions (README).")
-        self.cam = Aravis.Camera.new(Aravis.get_device_id(0))
+        # The fake interface adds a device next to any real camera: pick the one that was asked for.
+        ids = [Aravis.get_device_id(i) for i in range(Aravis.get_n_devices())
+               if (Aravis.get_device_protocol(i) == "Fake") == fake]
+        if not ids:
+            raise RuntimeError("No camera found. Check USB cable and udev permissions (docs: host setup).")
+        self.cam = Aravis.Camera.new(ids[0])
         self.lock = threading.Lock()  # preview and capture share one device
         self.stream, self.live = None, None  # running preview stream and the settings it was started with
         self.live_fps = None  # frame rate the running stream can deliver (link limit and exposure)
